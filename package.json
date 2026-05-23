@@ -1,0 +1,19 @@
+{
+  "name": "ts-extensions-test",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "repository": "https://github.com/IvanKobtsev/ts-extensions-test.git",
+  "author": "Ivan Kobtsev <ivan.kobtsev@mcc-soft.de>",
+  "license": "MIT",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "typescript": "^6.0.3"
+  },
+  "peerDependencies": {
+    "typescript": ">=4.0.0"
+  }
+}
