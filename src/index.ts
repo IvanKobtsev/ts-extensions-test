@@ -519,14 +519,33 @@ function init(modules: { typescript: typeof ts }) {
                     const sourceFile = program.getSourceFile(fileName);
                     if (sourceFile) {
                         const typeChecker = program.getTypeChecker();
+                        const extMethods = collectExtensionMethods(program, typeChecker);
+
+                        // Resolve the PropertyAccessExpression at position using two strategies:
+                        // 1. Strict: deepest node is the name identifier itself (VS Code behaviour).
+                        // 2. Lenient: findPropertyAccessAt finds the enclosing PAE, then we require
+                        //    position to be on or after the name part (handles WebStorm which may
+                        //    pass the position of the dot or the whole expression).
+                        let targetPropAccess: ts.PropertyAccessExpression | undefined;
 
                         const node = findNodeAtPosition(sourceFile, position);
-                        if (node && ts.isIdentifier(node) && ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) {
-                            const propAccess = node.parent;
-                            const objType = typeChecker.getTypeAtLocation(propAccess.expression);
-                            const propName = node.text;
+                        if (node && ts.isIdentifier(node) &&
+                            ts.isPropertyAccessExpression(node.parent) &&
+                            node.parent.name === node) {
+                            targetPropAccess = node.parent;
+                        }
 
-                            const extMethods = collectExtensionMethods(program, typeChecker);
+                        if (!targetPropAccess) {
+                            const pae = findPropertyAccessAt(sourceFile, position);
+                            if (pae && position >= pae.name.getStart(sourceFile)) {
+                                targetPropAccess = pae;
+                            }
+                        }
+
+                        if (targetPropAccess) {
+                            const objType = typeChecker.getTypeAtLocation(targetPropAccess.expression);
+                            const propName = targetPropAccess.name.text;
+
                             const match = extMethods.find(
                                 m => m.name === propName && typesMatch(objType, m.firstParamType, typeChecker)
                             );
@@ -545,10 +564,16 @@ function init(modules: { typescript: typeof ts }) {
                                     paramParts.push({ text: pType, kind: "keyword" });
                                 });
 
+                                const nameNode = targetPropAccess.name;
                                 return {
                                     kind: ts.ScriptElementKind.functionElement,
                                     kindModifiers: "",
-                                    textSpan: { start: node.getStart(sourceFile), length: node.getWidth(sourceFile) },
+                                    // textSpan covers only the method name identifier so the
+                                    // tooltip is anchored to "toUserDto", not to the whole expression.
+                                    textSpan: {
+                                        start: nameNode.getStart(sourceFile),
+                                        length: nameNode.getWidth(sourceFile),
+                                    },
                                     displayParts: [
                                         { text: "(", kind: "punctuation" },
                                         { text: "extension method", kind: "text" },
@@ -561,7 +586,16 @@ function init(modules: { typescript: typeof ts }) {
                                         { text: ": ", kind: "punctuation" },
                                         { text: returnTypeStr, kind: "keyword" },
                                     ],
-                                    documentation: [],
+                                    // Returning a non-empty documentation array signals to WebStorm
+                                    // that this quick-info is complete, discouraging it from merging
+                                    // the result with its own variable-type analysis.
+                                    documentation: [
+                                        {
+                                            text: `Defined in ${computeRelativePath(fileName, match.sourceFileName)}`,
+                                            kind: "text",
+                                        },
+                                    ],
+                                    tags: [],
                                 };
                             }
                         }
