@@ -1,4 +1,4 @@
-import {User, UserDto} from "./types";
+import {User } from "./types";
 
 type Admin = { id: string; name2: string };
 

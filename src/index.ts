@@ -71,16 +71,16 @@ function init(modules: { typescript: typeof ts }) {
                     if (!sourceFile) return undefined;
 
                     const codeActions: ts.CodeAction[] = [];
-                    if (!isAlreadyImported(sourceFile, entryName)) {
+                    if (!isAlreadyImported(sourceFile, source)) {
                         const relativePath = computeRelativePath(fileName, source);
                         const insertPosition = findImportInsertPosition(sourceFile);
                         codeActions.push({
-                            description: `Import '${entryName}' from '${relativePath}'`,
+                            description: `Import extension methods from '${relativePath}'`,
                             changes: [{
                                 fileName,
                                 textChanges: [{
                                     span: { start: insertPosition, length: 0 },
-                                    newText: `import { ${entryName} } from '${relativePath}';\n`,
+                                    newText: `\nimport '${relativePath}';`,
                                 }],
                             }],
                         });
@@ -374,11 +374,13 @@ function init(modules: { typescript: typeof ts }) {
                 if (!sourceFile) return prior;
                 const typeChecker = program.getTypeChecker();
 
-                // Check if position is on an import specifier that is an ext method
                 const node = findNodeAtPosition(sourceFile, position);
                 if (!node || !ts.isIdentifier(node)) return prior;
 
-                const extMethodName = resolveExtMethodImport(node, typeChecker);
+                // Handle both: import specifier AND function declaration in .ext.ts
+                const extMethodName =
+                    resolveExtMethodImport(node, typeChecker) ??
+                    resolveExtMethodDeclaration(node);
                 if (!extMethodName) return prior;
 
                 const extMethods = collectExtensionMethods(program, typeChecker);
@@ -418,7 +420,10 @@ function init(modules: { typescript: typeof ts }) {
                 const node = findNodeAtPosition(sourceFile, position);
                 if (!node || !ts.isIdentifier(node)) return prior;
 
-                const extMethodName = resolveExtMethodImport(node, typeChecker);
+                // Handle both: import specifier AND function declaration in .ext.ts
+                const extMethodName =
+                    resolveExtMethodImport(node, typeChecker) ??
+                    resolveExtMethodDeclaration(node);
                 if (!extMethodName) return prior;
 
                 const extMethods = collectExtensionMethods(program, typeChecker);
@@ -567,6 +572,61 @@ function init(modules: { typescript: typeof ts }) {
             }
 
             return info.languageService.getQuickInfoAtPosition(fileName, position);
+        };
+
+        // ---- getCodeFixesAtPosition — quick-fix for "ext method not imported" ----
+        proxy.getCodeFixesAtPosition = (fileName, start, end, errorCodes, formatOptions, preferences) => {
+            const prior = info.languageService.getCodeFixesAtPosition(fileName, start, end, errorCodes, formatOptions, preferences);
+            try {
+                if (!errorCodes.includes(2339)) return prior;
+
+                const program = info.languageService.getProgram();
+                if (!program) return prior;
+                const sourceFile = program.getSourceFile(fileName);
+                if (!sourceFile) return prior;
+                const typeChecker = program.getTypeChecker();
+
+                // Find the identifier at the error position
+                const node = findNodeAtPosition(sourceFile, start);
+                if (!node || !ts.isIdentifier(node)) return prior;
+                if (!ts.isPropertyAccessExpression(node.parent) || node.parent.name !== node) return prior;
+
+                const objType = typeChecker.getTypeAtLocation(node.parent.expression);
+                const propName = node.text;
+
+                const allExtMethods = collectExtensionMethods(program, typeChecker);
+                const importedExtFileNames = getImportedExtFileNames(sourceFile, program);
+
+                const match = allExtMethods.find(
+                    m =>
+                        m.name === propName &&
+                        typesMatch(objType, m.firstParamType, typeChecker) &&
+                        !importedExtFileNames.has(normalizePath(m.sourceFileName))
+                );
+                if (!match) return prior;
+
+                const relativePath = computeRelativePath(fileName, match.sourceFileName);
+                const insertPosition = findImportInsertPosition(sourceFile);
+
+                const fix: ts.CodeFixAction = {
+                    fixName: "addExtImport",
+                    description: `Add import '${relativePath}'`,
+                    changes: [{
+                        fileName,
+                        textChanges: [{
+                            span: { start: insertPosition, length: 0 },
+                            newText: `\nimport '${relativePath}';`,
+                        }],
+                    }],
+                    fixId: "addExtImport",
+                    fixAllDescription: `Add all missing extension method imports`,
+                };
+
+                return [...prior, fix];
+            } catch (e) {
+                info.project.projectService.logger.info(`[ts-extensions-test] Error in getCodeFixesAtPosition: ${e}`);
+                return prior;
+            }
         };
 
         return proxy;
@@ -830,6 +890,17 @@ function init(modules: { typescript: typeof ts }) {
         return null;
     }
 
+    /** If `node` is the name identifier of a function/variable declaration in a .ext.ts file,
+     *  returns the method name. Otherwise returns null. */
+    function resolveExtMethodDeclaration(node: ts.Node): string | null {
+        if (!ts.isIdentifier(node)) return null;
+        if (!node.getSourceFile().fileName.endsWith(".ext.ts")) return null;
+        const parent = node.parent;
+        if (ts.isFunctionDeclaration(parent) && parent.name === node) return node.text;
+        if (ts.isVariableDeclaration(parent) && parent.name === node) return node.text;
+        return null;
+    }
+
     /** Gather ReferencedSymbolEntry items for all ext method call sites in `sf` */
     function findExtCallSites(
         sf: ts.SourceFile,
@@ -1022,17 +1093,17 @@ function init(modules: { typescript: typeof ts }) {
         return typeChecker.typeToString(a) === typeChecker.typeToString(b);
     }
 
-    function isAlreadyImported(sourceFile: ts.SourceFile, name: string): boolean {
+    /** Returns true when the given .ext.ts file is already side-effect-imported in sourceFile. */
+    function isAlreadyImported(sourceFile: ts.SourceFile, extSourceFileName: string): boolean {
+        const fromDir = path.dirname(sourceFile.fileName);
         for (const stmt of sourceFile.statements) {
             if (!ts.isImportDeclaration(stmt)) continue;
-            const clause = stmt.importClause;
-            if (!clause) continue;
-            if (clause.name?.text === name) return true;
-            if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
-                for (const el of clause.namedBindings.elements) {
-                    if (el.name.text === name) return true;
-                }
-            }
+            if (!ts.isStringLiteral(stmt.moduleSpecifier)) continue;
+            const specifier = stmt.moduleSpecifier.text;
+            if (!/\.ext(\.ts)?$/.test(specifier)) continue;
+            let resolved = path.resolve(fromDir, specifier);
+            if (!resolved.endsWith(".ts")) resolved += ".ts";
+            if (normalizePath(resolved) === normalizePath(extSourceFileName)) return true;
         }
         return false;
     }
