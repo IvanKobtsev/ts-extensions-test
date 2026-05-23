@@ -1,3 +1,4 @@
-./node_modules
-./dist
-./test-project/node_modules
+.idea
+node_modules
+dist
+test-project/node_modules

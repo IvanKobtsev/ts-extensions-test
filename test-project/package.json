@@ -1,0 +1,10 @@
+{
+  "name": "test-project",
+  "version": "1.0.0",
+  "main": "index.js",
+  "license": "MIT",
+  "dependencies": {
+    "ts-extensions-test": "file:..",
+    "typescript": "^6.0.3"
+  }
+}
