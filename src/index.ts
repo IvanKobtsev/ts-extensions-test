@@ -244,6 +244,8 @@ function init(modules: { typescript: typeof import("typescript/lib/tsserverlibra
                     // Error for non-existing properties accessed on ext-method return types
                     // (TypeScript sees these as `any` and wouldn't catch them otherwise)
                     ...checkInvalidAccessOnExtReturnTypes(sourceFile, typeChecker, allExtMethods, program),
+                    // Structural rules for .ext.ts files themselves
+                    ...checkExtFileValidity(sourceFile, typeChecker, allExtMethods, program),
                 ];
 
                 return [...filtered, ...extra];
@@ -1037,6 +1039,115 @@ function init(modules: { typescript: typeof import("typescript/lib/tsserverlibra
         }
 
         visit(sourceFile);
+        return diagnostics;
+    }
+
+    // ---- Validate .ext.ts file structure and usage ----
+
+    /**
+     * Enforces three rules on every .ext.ts file:
+     *
+     * 1. Extension method calls (dot-notation) are forbidden inside .ext.ts files.
+     * 2. The first parameter (the receiver) must be a named type reference — no unions,
+     *    intersections, primitives, `null`, `never`, etc.
+     * 3. Only `import` declarations and `function` declarations are allowed;
+     *    functions with zero parameters are also forbidden.
+     */
+    function checkExtFileValidity(
+        sourceFile: ts.SourceFile,
+        typeChecker: ts.TypeChecker,
+        allExtMethods: ExtMethod[],
+        program: ts.Program
+    ): ts.Diagnostic[] {
+        if (!sourceFile.fileName.endsWith('.ext.ts')) return [];
+
+        const diagnostics: ts.Diagnostic[] = [];
+
+        // ---- Rule 3: only imports + function declarations are allowed ----
+        for (const stmt of sourceFile.statements) {
+            if (ts.isImportDeclaration(stmt)) {
+                // Rule 4: importing other .ext.ts files is forbidden inside .ext.ts
+                if (
+                    ts.isStringLiteral(stmt.moduleSpecifier) &&
+                    /\.ext(\.ts)?$/.test(stmt.moduleSpecifier.text)
+                ) {
+                    diagnostics.push(makeDiag(
+                        sourceFile,
+                        stmt.moduleSpecifier.getStart(sourceFile),
+                        stmt.moduleSpecifier.getWidth(sourceFile),
+                        ts.DiagnosticCategory.Error, 90005,
+                        `Importing '.ext.ts' files inside another '.ext.ts' file is not allowed. ` +
+                        `Extension methods cannot be used via dot-notation here anyway.`
+                    ));
+                }
+                continue;
+            }
+
+            if (ts.isFunctionDeclaration(stmt)) {
+                // Rule 3b: functions must have at least one parameter
+                if (!stmt.parameters || stmt.parameters.length === 0) {
+                    const nameNode = stmt.name;
+                    const start = nameNode ? nameNode.getStart(sourceFile) : stmt.getStart(sourceFile);
+                    const length = nameNode ? nameNode.getWidth(sourceFile) : stmt.getWidth(sourceFile);
+                    diagnostics.push(makeDiag(
+                        sourceFile, start, length,
+                        ts.DiagnosticCategory.Error, 90003,
+                        `Extension methods must have at least one parameter (the receiver).`
+                    ));
+                    continue;
+                }
+
+                // Rule 2: first parameter must be a named TypeReference
+                const firstParam = stmt.parameters[0];
+                const typeNode = firstParam.type;
+                if (!typeNode || !ts.isTypeReferenceNode(typeNode)) {
+                    const errorNode = typeNode ?? firstParam;
+                    diagnostics.push(makeDiag(
+                        sourceFile,
+                        errorNode.getStart(sourceFile),
+                        errorNode.getWidth(sourceFile),
+                        ts.DiagnosticCategory.Error, 90002,
+                        `The receiver (first parameter) of an extension method must be a named type. ` +
+                        `Unions, intersections, primitives, 'null', and 'never' are not allowed — ` +
+                        `declare a named type alias instead.`
+                    ));
+                }
+                continue;
+            }
+
+            // Everything else (variable statements, type declarations, classes, etc.) is forbidden
+            diagnostics.push(makeDiag(
+                sourceFile,
+                stmt.getStart(sourceFile),
+                stmt.getWidth(sourceFile),
+                ts.DiagnosticCategory.Error, 90001,
+                `Only import declarations and function declarations are allowed in '.ext.ts' files.`
+            ));
+        }
+
+        // ---- Rule 1: ext method calls (dot-notation) are forbidden inside .ext.ts files ----
+        function visitForExtCalls(node: ts.Node) {
+            if (ts.isPropertyAccessExpression(node)) {
+                const objType = getEffectiveReceiverType(node.expression, typeChecker, allExtMethods, program);
+                const propName = node.name.text;
+                const match = allExtMethods.find(
+                    m => m.name === propName && typesMatch(objType, m.firstParamType, typeChecker)
+                );
+                if (match) {
+                    diagnostics.push(makeDiag(
+                        sourceFile,
+                        node.name.getStart(sourceFile),
+                        node.name.getWidth(sourceFile),
+                        ts.DiagnosticCategory.Error, 90004,
+                        `Extension methods cannot be called using dot-notation inside '.ext.ts' files. ` +
+                        `Call '${match.name}' as a regular function instead: ${match.name}(${match.params[0] && ts.isIdentifier(match.params[0].name) ? match.params[0].name.text : 'receiver'}).`
+                    ));
+                }
+            }
+            ts.forEachChild(node, visitForExtCalls);
+        }
+        visitForExtCalls(sourceFile);
+
         return diagnostics;
     }
 
