@@ -13,7 +13,30 @@ function init(modules: { typescript: typeof ts }) {
     }
 
     function create(info: ts.server.PluginCreateInfo): ts.LanguageService {
-        info.project.projectService.logger.info("[ts-extensions-test] Plugin loaded!");
+        const log = (msg: string) => info.project.projectService.logger.info(`[ts-extensions-test] ${msg}`);
+        log("Plugin loaded!");
+
+        // ---- Patch getScriptSnapshot to append module augmentation to .ext.ts files ----
+        // This is the cleanest way to teach TypeScript the return types of extension methods.
+        // Since .ext.ts files are already modules (they have imports), a `declare module`
+        // block appended to them becomes a proper module augmentation — TypeScript sees the
+        // enriched interface everywhere the ext file is transitively included.
+        const host = info.languageServiceHost;
+        const originalGetScriptSnapshot = host.getScriptSnapshot.bind(host);
+        host.getScriptSnapshot = (fileName: string) => {
+            const original = originalGetScriptSnapshot(fileName);
+            if (!normalizePath(fileName).endsWith('.ext.ts')) return original;
+            if (!original) return original;
+            try {
+                const augCode = generateAugmentationForExtFile(fileName, original);
+                if (!augCode) return original;
+                const originalText = original.getText(0, original.getLength());
+                return ts.ScriptSnapshot.fromString(originalText + '\n' + augCode);
+            } catch (e) {
+                log(`getScriptSnapshot patch error for ${fileName}: ${e}`);
+                return original;
+            }
+        };
 
         const proxy = Object.create(null) as ts.LanguageService;
         for (const k of Object.keys(info.languageService) as Array<keyof ts.LanguageService>) {
@@ -36,16 +59,47 @@ function init(modules: { typescript: typeof ts }) {
                 const accessExpr = findPropertyAccessAt(sourceFile, position);
                 if (!accessExpr) return prior;
 
-                const objType = typeChecker.getTypeAtLocation(accessExpr.expression);
-
-                // Cover only the partial name AFTER the dot — "user." stays in the file
                 const nameStart = accessExpr.name.getStart(sourceFile);
                 const replacementSpan: ts.TextSpan = {
                     start: nameStart,
                     length: position - nameStart,
                 };
 
-                const extEntries = collectExtensionMethods(program, typeChecker)
+                const allExtMethods = collectExtensionMethods(program, typeChecker);
+
+                // Resolve the actual type of the expression left of the dot,
+                // tracing through ext-method calls and variables assigned from them.
+                const resolvedType = resolveExtReturnType(accessExpr.expression, typeChecker, allExtMethods, program);
+
+                if (resolvedType) {
+                    // Regular members of the resolved type
+                    const propertyEntries: ts.CompletionEntry[] =
+                        typeChecker.getPropertiesOfType(resolvedType).map(symbol => ({
+                            name: symbol.name,
+                            kind: symbolToScriptElementKind(symbol),
+                            sortText: symbol.name,
+                            replacementSpan,
+                        }));
+
+                    // Extension methods on the resolved type
+                    const extEntries = allExtMethods
+                        .filter(m => typesMatch(resolvedType, m.firstParamType, typeChecker))
+                        .map(m => makeCompletionEntry(m, typeChecker, replacementSpan));
+
+                    const entries = [...propertyEntries, ...extEntries];
+                    if (entries.length > 0) {
+                        return {
+                            isGlobalCompletion: false,
+                            isMemberCompletion: true,
+                            isNewIdentifierLocation: false,
+                            entries,
+                        };
+                    }
+                }
+
+                // ---- Case: user.<cursor> — suggest extension methods ----
+                const objType = typeChecker.getTypeAtLocation(accessExpr.expression);
+                const extEntries = allExtMethods
                     .filter(m => typesMatch(objType, m.firstParamType, typeChecker))
                     .map(m => makeCompletionEntry(m, typeChecker, replacementSpan));
 
@@ -109,7 +163,8 @@ function init(modules: { typescript: typeof ts }) {
             diagnostics: ts.Diagnostic[],
             sourceFile: ts.SourceFile,
             typeChecker: ts.TypeChecker,
-            extMethods: ExtMethod[]
+            extMethods: ExtMethod[],
+            program: ts.Program
         ): ts.Diagnostic[] {
             return diagnostics.filter(diag => {
                 // 2339 = Property 'X' does not exist on type 'Y'
@@ -124,7 +179,7 @@ function init(modules: { typescript: typeof ts }) {
                             propAccess = node;
                         }
                         if (propAccess) {
-                            const objType = typeChecker.getTypeAtLocation(propAccess.expression);
+                            const objType = getEffectiveReceiverType(propAccess.expression, typeChecker, extMethods, program);
                             const propName = propAccess.name.text;
                             if (extMethods.some(m => m.name === propName && typesMatch(objType, m.firstParamType, typeChecker))) {
                                 return false;
@@ -176,19 +231,14 @@ function init(modules: { typescript: typeof ts }) {
                 const allExtMethods = collectExtensionMethods(program, typeChecker);
                 // Suppress 2339/2349 for ALL ext methods (imported or not) —
                 // unimported ones get a better custom error below.
-                const filtered = filterExtDiagnostics(diagnostics, sourceFile, typeChecker, allExtMethods);
+                const filtered = filterExtDiagnostics(diagnostics, sourceFile, typeChecker, allExtMethods, program);
                 if (allExtMethods.length === 0) return filtered;
 
                 const importedExtFileNames = getImportedExtFileNames(sourceFile, program);
-                const importedExtMethods = allExtMethods.filter(
-                    m => importedExtFileNames.has(normalizePath(m.sourceFileName))
-                );
 
                 const extra: ts.Diagnostic[] = [
-                    // Type-check calls only for imported ext methods
-                    ...checkExtensionMethodCalls(sourceFile, typeChecker, importedExtMethods),
                     // Error for ext method calls whose source file is not imported
-                    ...checkUnimportedExtMethodCalls(sourceFile, typeChecker, allExtMethods, importedExtFileNames),
+                    ...checkUnimportedExtMethodCalls(sourceFile, typeChecker, allExtMethods, importedExtFileNames, program),
                     // Error for duplicate ext method names for the same type across .ext.ts files
                     ...checkDuplicateExtMethods(sourceFile, allExtMethods, typeChecker),
                 ];
@@ -213,7 +263,7 @@ function init(modules: { typescript: typeof ts }) {
                 // the 6133/6196 filter only needs the source file AST, not ext methods.
                 const extMethods = collectExtensionMethods(program, typeChecker);
 
-                return filterExtDiagnostics(diagnostics as ts.Diagnostic[], sourceFile, typeChecker, extMethods) as ts.DiagnosticWithLocation[];
+                return filterExtDiagnostics(diagnostics as ts.Diagnostic[], sourceFile, typeChecker, extMethods, program) as ts.DiagnosticWithLocation[];
             } catch (e) {
                 info.project.projectService.logger.info(`[ts-extensions-test] Error in getSuggestionDiagnostics: ${e}`);
                 return diagnostics;
@@ -237,10 +287,10 @@ function init(modules: { typescript: typeof ts }) {
                 if (!callExpr || !ts.isPropertyAccessExpression(callExpr.expression)) return prior;
 
                 const propAccess = callExpr.expression;
-                const objType = typeChecker.getTypeAtLocation(propAccess.expression);
+                const extMethods = collectExtensionMethods(program, typeChecker);
+                const objType = getEffectiveReceiverType(propAccess.expression, typeChecker, extMethods, program);
                 const propName = propAccess.name.text;
 
-                const extMethods = collectExtensionMethods(program, typeChecker);
                 const match = extMethods.find(
                     m => m.name === propName && typesMatch(objType, m.firstParamType, typeChecker)
                 );
@@ -327,7 +377,7 @@ function init(modules: { typescript: typeof ts }) {
                         ts.isPropertyAccessExpression(node.parent) &&
                         node.parent.name === node
                     ) {
-                        const objType = typeChecker.getTypeAtLocation(node.parent.expression);
+                        const objType = getEffectiveReceiverType(node.parent.expression, typeChecker, extMethods, program!);
                         const match = extMethods.find(
                             m => m.name === node.text && typesMatch(objType, m.firstParamType, typeChecker)
                         );
@@ -390,7 +440,7 @@ function init(modules: { typescript: typeof ts }) {
                 // Collect all call sites: user.toUserDto(...)
                 const callRefs: ts.ReferencedSymbolEntry[] = [];
                 for (const sf of program.getSourceFiles()) {
-                    findExtCallSites(sf, typeChecker, match, callRefs);
+                    findExtCallSites(sf, typeChecker, match, callRefs, extMethods, program);
                 }
 
                 if (callRefs.length === 0) return prior;
@@ -432,7 +482,7 @@ function init(modules: { typescript: typeof ts }) {
 
                 const callRefs: ts.ReferenceEntry[] = [];
                 for (const sf of program.getSourceFiles()) {
-                    visitForCallRefs(sf, typeChecker, match, callRefs);
+                    visitForCallRefs(sf, typeChecker, match, callRefs, extMethods, program);
                 }
 
                 return [...(prior ?? []), ...callRefs];
@@ -444,6 +494,7 @@ function init(modules: { typescript: typeof ts }) {
 
         // ---- getDefinitionAndBoundSpan — Ctrl+Click navigation for user.toUserDto ----
         proxy.getDefinitionAndBoundSpan = (fileName, position) => {
+
             try {
                 const program = info.languageService.getProgram();
                 if (program) {
@@ -452,18 +503,25 @@ function init(modules: { typescript: typeof ts }) {
                         const typeChecker = program.getTypeChecker();
                         const node = findNodeAtPosition(sourceFile, position);
 
+                        log(`[def] node=${node ? ts.SyntaxKind[node.kind] : 'null'} text=${(node as any)?.text ?? ''}`);
+
                         if (node && ts.isIdentifier(node) && ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) {
                             const propAccess = node.parent;
-                            const objType = typeChecker.getTypeAtLocation(propAccess.expression);
+                            const extMethods = collectExtensionMethods(program, typeChecker);
+                            const objType = getEffectiveReceiverType(propAccess.expression, typeChecker, extMethods, program);
                             const propName = node.text;
 
-                            const extMethods = collectExtensionMethods(program, typeChecker);
+                            log(`[def] propName=${propName} receiverType=${typeChecker.typeToString(objType)} extMethods=${extMethods.map(m=>m.name).join(',')}`);
+
                             const match = extMethods.find(
                                 m => m.name === propName && typesMatch(objType, m.firstParamType, typeChecker)
                             );
 
+                            log(`[def] match=${match ? match.name + ' in ' + match.sourceFileName : 'null'}`);
+
                             if (match) {
                                 const extSourceFile = program.getSourceFile(match.sourceFileName);
+                                log(`[def] extSourceFile=${extSourceFile ? 'found' : 'NOT FOUND for ' + match.sourceFileName}`);
                                 if (extSourceFile) {
                                     // Find the declaration node in the ext file to get exact span
                                     let defStart = 0;
@@ -485,6 +543,7 @@ function init(modules: { typescript: typeof ts }) {
                                         }
                                     }
 
+                                    log(`[def] returning definition: ${match.sourceFileName}:${defStart}`);
                                     return {
                                         textSpan: {
                                             start: node.getStart(sourceFile),
@@ -508,10 +567,77 @@ function init(modules: { typescript: typeof ts }) {
                 info.project.projectService.logger.info(`[ts-extensions-test] Error in getDefinitionAndBoundSpan: ${e}`);
             }
 
-            return info.languageService.getDefinitionAndBoundSpan(fileName, position);
+            try {
+                return info.languageService.getDefinitionAndBoundSpan(fileName, position);
+            } catch (e) {
+                info.project.projectService.logger.info(`[ts-extensions-test] Error in getDefinitionAndBoundSpan fallback: ${e}`);
+                return undefined;
+            }
         };
 
-        // ---- getQuickInfoAtPosition — hover tooltip for user.toUserDto ----
+        // ---- getDefinitionAtPosition — same as above, some IDEs use this instead of getDefinitionAndBoundSpan ----
+        proxy.getDefinitionAtPosition = (fileName, position) => {
+            try {
+                const program = info.languageService.getProgram();
+                if (program) {
+                    const sourceFile = program.getSourceFile(fileName);
+                    if (sourceFile) {
+                        const typeChecker = program.getTypeChecker();
+                        const node = findNodeAtPosition(sourceFile, position);
+
+                        if (node && ts.isIdentifier(node) && ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) {
+                            const propAccess = node.parent;
+                            const extMethods = collectExtensionMethods(program, typeChecker);
+                            const objType = getEffectiveReceiverType(propAccess.expression, typeChecker, extMethods, program);
+                            const propName = node.text;
+
+                            const match = extMethods.find(
+                                m => m.name === propName && typesMatch(objType, m.firstParamType, typeChecker)
+                            );
+
+                            if (match) {
+                                const extSourceFile = program.getSourceFile(match.sourceFileName);
+                                if (extSourceFile) {
+                                    let defStart = 0;
+                                    let defLength = 0;
+                                    for (const stmt of extSourceFile.statements) {
+                                        if (ts.isFunctionDeclaration(stmt) && stmt.name?.text === match.name) {
+                                            defStart = stmt.name.getStart(extSourceFile);
+                                            defLength = stmt.name.getWidth(extSourceFile);
+                                            break;
+                                        }
+                                        if (ts.isVariableStatement(stmt)) {
+                                            for (const decl of stmt.declarationList.declarations) {
+                                                if (ts.isIdentifier(decl.name) && decl.name.text === match.name) {
+                                                    defStart = decl.name.getStart(extSourceFile);
+                                                    defLength = decl.name.getWidth(extSourceFile);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    log(`[defAtPos] returning definition: ${match.name} → ${match.sourceFileName}:${defStart}`);
+                                    return [{
+                                        fileName: match.sourceFileName,
+                                        textSpan: { start: defStart, length: defLength },
+                                        kind: ts.ScriptElementKind.functionElement,
+                                        name: match.name,
+                                        containerName: "",
+                                        containerKind: ts.ScriptElementKind.unknown,
+                                    }];
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e) {
+                info.project.projectService.logger.info(`[ts-extensions-test] Error in getDefinitionAtPosition: ${e}`);
+            }
+
+            return info.languageService.getDefinitionAtPosition(fileName, position);
+        };
+
+        // ---- getQuickInfoAtPosition — hover tooltip for user.toUserDto / variables assigned from it ----
         proxy.getQuickInfoAtPosition = (fileName, position) => {
             try {
                 const program = info.languageService.getProgram();
@@ -520,83 +646,76 @@ function init(modules: { typescript: typeof ts }) {
                     if (sourceFile) {
                         const typeChecker = program.getTypeChecker();
                         const extMethods = collectExtensionMethods(program, typeChecker);
-
-                        // Resolve the PropertyAccessExpression at position using two strategies:
-                        // 1. Strict: deepest node is the name identifier itself (VS Code behaviour).
-                        // 2. Lenient: findPropertyAccessAt finds the enclosing PAE, then we require
-                        //    position to be on or after the name part (handles WebStorm which may
-                        //    pass the position of the dot or the whole expression).
-                        let targetPropAccess: ts.PropertyAccessExpression | undefined;
-
                         const node = findNodeAtPosition(sourceFile, position);
-                        if (node && ts.isIdentifier(node) &&
-                            ts.isPropertyAccessExpression(node.parent) &&
-                            node.parent.name === node) {
-                            targetPropAccess = node.parent;
-                        }
+                        if (node && ts.isIdentifier(node)) {
 
-                        if (!targetPropAccess) {
-                            const pae = findPropertyAccessAt(sourceFile, position);
-                            if (pae && position >= pae.name.getStart(sourceFile)) {
-                                targetPropAccess = pae;
+                            // Case 1: hovering on the ext method name in a property access (user.toUserDto)
+                            if (ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) {
+                                const propAccess = node.parent;
+                                const objType = getEffectiveReceiverType(propAccess.expression, typeChecker, extMethods, program);
+                                const propName = node.text;
+
+                                const match = extMethods.find(
+                                    m => m.name === propName && typesMatch(objType, m.firstParamType, typeChecker)
+                                );
+
+                                if (match) {
+                                    const restParams = Array.from(match.params).slice(1);
+                                    const returnTypeStr = typeChecker.typeToString(match.returnType);
+
+                                    const paramParts: ts.SymbolDisplayPart[] = [];
+                                    restParams.forEach((p, i) => {
+                                        if (i > 0) paramParts.push({ text: ", ", kind: "punctuation" });
+                                        const pName = ts.isIdentifier(p.name) ? p.name.text : "_";
+                                        const pType = typeChecker.typeToString(typeChecker.getTypeAtLocation(p));
+                                        paramParts.push({ text: pName, kind: "parameterName" });
+                                        paramParts.push({ text: ": ", kind: "punctuation" });
+                                        paramParts.push({ text: pType, kind: "keyword" });
+                                    });
+
+                                    return {
+                                        kind: ts.ScriptElementKind.functionElement,
+                                        kindModifiers: "",
+                                        textSpan: { start: node.getStart(sourceFile), length: node.getWidth(sourceFile) },
+                                        displayParts: [
+                                            { text: "(", kind: "punctuation" },
+                                            { text: "extension method", kind: "text" },
+                                            { text: ")", kind: "punctuation" },
+                                            { text: " ", kind: "space" },
+                                            { text: propName, kind: "functionName" },
+                                            { text: "(", kind: "punctuation" },
+                                            ...paramParts,
+                                            { text: ")", kind: "punctuation" },
+                                            { text: ": ", kind: "punctuation" },
+                                            { text: returnTypeStr, kind: "keyword" },
+                                        ],
+                                        documentation: [],
+                                    };
+                                }
                             }
-                        }
 
-                        if (targetPropAccess) {
-                            const objType = typeChecker.getTypeAtLocation(targetPropAccess.expression);
-                            const propName = targetPropAccess.name.text;
-
-                            const match = extMethods.find(
-                                m => m.name === propName && typesMatch(objType, m.firstParamType, typeChecker)
-                            );
-
-                            if (match) {
-                                const restParams = Array.from(match.params).slice(1);
-                                const returnTypeStr = typeChecker.typeToString(match.returnType);
-
-                                const paramParts: ts.SymbolDisplayPart[] = [];
-                                restParams.forEach((p, i) => {
-                                    if (i > 0) paramParts.push({ text: ", ", kind: "punctuation" });
-                                    const pName = ts.isIdentifier(p.name) ? p.name.text : "_";
-                                    const pType = typeChecker.typeToString(typeChecker.getTypeAtLocation(p));
-                                    paramParts.push({ text: pName, kind: "parameterName" });
-                                    paramParts.push({ text: ": ", kind: "punctuation" });
-                                    paramParts.push({ text: pType, kind: "keyword" });
-                                });
-
-                                const nameNode = targetPropAccess.name;
-                                return {
-                                    kind: ts.ScriptElementKind.functionElement,
-                                    kindModifiers: "",
-                                    // textSpan covers only the method name identifier so the
-                                    // tooltip is anchored to "toUserDto", not to the whole expression.
-                                    textSpan: {
-                                        start: nameNode.getStart(sourceFile),
-                                        length: nameNode.getWidth(sourceFile),
-                                    },
-                                    displayParts: [
-                                        { text: "(", kind: "punctuation" },
-                                        { text: "extension method", kind: "text" },
-                                        { text: ")", kind: "punctuation" },
-                                        { text: " ", kind: "space" },
-                                        { text: propName, kind: "functionName" },
-                                        { text: "(", kind: "punctuation" },
-                                        ...paramParts,
-                                        { text: ")", kind: "punctuation" },
-                                        { text: ": ", kind: "punctuation" },
-                                        { text: returnTypeStr, kind: "keyword" },
-                                    ],
-                                    // Returning a non-empty documentation array signals to WebStorm
-                                    // that this quick-info is complete, discouraging it from merging
-                                    // the result with its own variable-type analysis.
-                                    documentation: [
-                                        {
-                                            text: `Defined in ${computeRelativePath(fileName, match.sourceFileName)}`,
-                                            kind: "text",
-                                        },
-                                    ],
-                                    tags: [],
-                                };
+                            // Case 2: hovering on a variable that was assigned from an ext method call
+                            // e.g. `const hopa = user.toUserDto()` — show correct type instead of `any`
+                            const symbol = typeChecker.getSymbolAtLocation(node);
+                            const decl = symbol?.declarations?.[0];
+                            if (decl && ts.isVariableDeclaration(decl) && decl.initializer) {
+                                const resolved = resolveExtReturnType(decl.initializer, typeChecker, extMethods, program);
+                                if (resolved) {
+                                    const typeStr = typeChecker.typeToString(resolved);
+                                    return {
+                                        kind: ts.ScriptElementKind.constElement,
+                                        kindModifiers: "",
+                                        textSpan: { start: node.getStart(sourceFile), length: node.getWidth(sourceFile) },
+                                        displayParts: [
+                                            { text: "const", kind: "keyword" },
+                                            { text: " ", kind: "space" },
+                                            { text: node.text, kind: "localName" },
+                                            { text: ": ", kind: "punctuation" },
+                                            { text: typeStr, kind: "keyword" },
+                                        ],
+                                        documentation: [],
+                                    };
+                                }
                             }
                         }
                     }
@@ -666,6 +785,127 @@ function init(modules: { typescript: typeof ts }) {
         return proxy;
     }
 
+    // ---- Augmentation injection into .ext.ts snapshots ----
+
+    /**
+     * Generates `declare module` augmentation code to append to a .ext.ts file's snapshot.
+     * IMPORTANT: TypeScript only supports module augmentation for `interface` declarations,
+     * NOT for `type` aliases. We skip augmentation silently when the receiver is a type alias
+     * to avoid "Duplicate identifier" errors.
+     */
+    function generateAugmentationForExtFile(
+        fileName: string,
+        snapshot: ts.IScriptSnapshot
+    ): string {
+        const content = snapshot.getText(0, snapshot.getLength());
+        const sf = ts.createSourceFile(fileName, content, ts.ScriptTarget.Latest, true);
+        const extDir = path.dirname(normalizePath(fileName));
+
+        // Build map: localTypeName → import specifier (as written in the file)
+        const typeToSpec = new Map<string, string>();
+        for (const stmt of sf.statements) {
+            if (!ts.isImportDeclaration(stmt)) continue;
+            if (!ts.isStringLiteral(stmt.moduleSpecifier)) continue;
+            const spec = stmt.moduleSpecifier.text;
+            const bindings = stmt.importClause?.namedBindings;
+            if (bindings && ts.isNamedImports(bindings)) {
+                for (const el of bindings.elements) {
+                    typeToSpec.set((el.propertyName ?? el.name).text, spec);
+                }
+            }
+        }
+
+        // Cache: resolved module path → Set of interface names in that module
+        const interfaceCache = new Map<string, Set<string>>();
+
+        /** Returns true only if `typeName` is declared as `interface` (not `type`) in `spec`. */
+        function isInterface(spec: string, typeName: string): boolean {
+            const absSpec = normalizePath(path.resolve(extDir, spec));
+            const cached = interfaceCache.get(absSpec);
+            if (cached) return cached.has(typeName);
+
+            // Try to read the source module from disk
+            const candidates = [absSpec + '.ts', absSpec + '.d.ts', absSpec, absSpec + '/index.ts'];
+            let modContent: string | undefined;
+            for (const c of candidates) {
+                modContent = ts.sys.readFile(c);
+                if (modContent !== undefined) break;
+            }
+            const ifaces = new Set<string>();
+            if (modContent !== undefined) {
+                const modSf = ts.createSourceFile(absSpec, modContent, ts.ScriptTarget.Latest, true);
+                for (const stmt of modSf.statements) {
+                    if (ts.isInterfaceDeclaration(stmt)) {
+                        ifaces.add(stmt.name.text);
+                    }
+                }
+            }
+            interfaceCache.set(absSpec, ifaces);
+            return ifaces.has(typeName);
+        }
+
+        // specifier → { typeName, method lines }
+        const bySpec = new Map<string, { typeName: string; lines: string[] }>();
+
+        for (const stmt of sf.statements) {
+            let name: string | undefined;
+            let params: ts.NodeArray<ts.ParameterDeclaration> | undefined;
+            let returnTypeNode: ts.TypeNode | undefined;
+
+            if (ts.isFunctionDeclaration(stmt) && stmt.name) {
+                name = stmt.name.text;
+                params = stmt.parameters;
+                returnTypeNode = stmt.type;
+            } else if (ts.isVariableStatement(stmt)) {
+                for (const decl of stmt.declarationList.declarations) {
+                    if (
+                        ts.isIdentifier(decl.name) &&
+                        decl.initializer &&
+                        (ts.isArrowFunction(decl.initializer) || ts.isFunctionExpression(decl.initializer))
+                    ) {
+                        name = decl.name.text;
+                        params = decl.initializer.parameters;
+                        returnTypeNode = decl.initializer.type;
+                        break;
+                    }
+                }
+            }
+
+            if (!name || !params || params.length === 0) continue;
+            const firstParam = params[0];
+            if (!firstParam.type) continue;
+
+            const typeName = firstParam.type.getText(sf).trim();
+            if (!typeToSpec.has(typeName)) continue;
+
+            const spec = typeToSpec.get(typeName)!;
+
+            // Skip if the receiver is a type alias — augmenting a type alias causes
+            // "Duplicate identifier" errors. Only interfaces can be augmented.
+            if (!isInterface(spec, typeName)) continue;
+
+            const restParams = Array.from(params).slice(1).map(p => p.getText(sf)).join(', ');
+            const returnType = returnTypeNode ? returnTypeNode.getText(sf).trim() : 'void';
+
+            const methodLine = `        ${name}(${restParams}): ${returnType};`;
+
+            if (!bySpec.has(spec)) bySpec.set(spec, { typeName, lines: [] });
+            bySpec.get(spec)!.lines.push(methodLine);
+        }
+
+        if (bySpec.size === 0) return '';
+
+        const out: string[] = [];
+        for (const [spec, { typeName, lines }] of bySpec) {
+            out.push(`declare module "${spec}" {`);
+            out.push(`    interface ${typeName} {`);
+            for (const l of lines) out.push(l);
+            out.push('    }');
+            out.push('}');
+        }
+        return out.join('\n');
+    }
+
     // ---- Collect all extension methods from *.ext.ts files in the program ----
 
     function collectExtensionMethods(program: ts.Program, typeChecker: ts.TypeChecker): ExtMethod[] {
@@ -678,6 +918,68 @@ function init(modules: { typescript: typeof ts }) {
             }
         }
         return result;
+    }
+
+    /**
+     * Returns the "effective" type of `expr` for ext-method matching — first tries to
+     * resolve it via ext-method AST tracing, then falls back to TypeScript's own inference.
+     * This is needed because TypeScript may infer `any` for chained ext calls on type aliases.
+     */
+    function getEffectiveReceiverType(
+        expr: ts.Expression,
+        typeChecker: ts.TypeChecker,
+        extMethods: ExtMethod[],
+        program: ts.Program
+    ): ts.Type {
+        return resolveExtReturnType(expr, typeChecker, extMethods, program)
+            ?? typeChecker.getTypeAtLocation(expr);
+    }
+
+    /**
+     * Recursively resolves the *actual* ext-method return type for an expression,
+     * tracing through variables assigned from ext-method calls.
+     *
+     * Examples:
+     *   user.toUserDto()          → UserDto (direct call)
+     *   hopa.                     → UserDto (where hopa = user.toUserDto())
+     *   hopa.toAdmin().           → Admin   (chained ext calls)
+     *
+     * Returns null if the expression has nothing to do with ext methods.
+     */
+    function resolveExtReturnType(
+        expr: ts.Expression,
+        typeChecker: ts.TypeChecker,
+        extMethods: ExtMethod[],
+        program: ts.Program,
+        depth = 0
+    ): ts.Type | null {
+        if (depth > 5) return null; // prevent infinite recursion
+
+        // Case 1: obj.extMethod(...) — direct ext method call
+        if (ts.isCallExpression(expr) && ts.isPropertyAccessExpression(expr.expression)) {
+            const propAccess = expr.expression;
+            // The receiver of the call itself might be an ext method call — resolve recursively
+            const receiverType =
+                resolveExtReturnType(propAccess.expression, typeChecker, extMethods, program, depth + 1)
+                ?? typeChecker.getTypeAtLocation(propAccess.expression);
+
+            const methodName = propAccess.name.text;
+            const match = extMethods.find(
+                m => m.name === methodName && typesMatch(receiverType, m.firstParamType, typeChecker)
+            );
+            if (match) return match.returnType;
+        }
+
+        // Case 2: identifier — look at its declaration initializer
+        if (ts.isIdentifier(expr)) {
+            const symbol = typeChecker.getSymbolAtLocation(expr);
+            const decl = symbol?.declarations?.[0];
+            if (decl && ts.isVariableDeclaration(decl) && decl.initializer) {
+                return resolveExtReturnType(decl.initializer, typeChecker, extMethods, program, depth + 1);
+            }
+        }
+
+        return null;
     }
 
     // ---- Resolve which *.ext.ts files are side-effect-imported in a source file ----
@@ -704,13 +1006,14 @@ function init(modules: { typescript: typeof ts }) {
         sourceFile: ts.SourceFile,
         typeChecker: ts.TypeChecker,
         allExtMethods: ExtMethod[],
-        importedExtFileNames: Set<string>
+        importedExtFileNames: Set<string>,
+        program: ts.Program
     ): ts.Diagnostic[] {
         const diagnostics: ts.Diagnostic[] = [];
 
         function visit(node: ts.Node) {
             if (ts.isPropertyAccessExpression(node)) {
-                const objType = typeChecker.getTypeAtLocation(node.expression);
+                const objType = getEffectiveReceiverType(node.expression, typeChecker, allExtMethods, program);
                 const propName = node.name.text;
                 const match = allExtMethods.find(
                     m => m.name === propName && typesMatch(objType, m.firstParamType, typeChecker)
@@ -787,107 +1090,6 @@ function init(modules: { typescript: typeof ts }) {
         return diagnostics;
     }
 
-    // ---- Type-check calls of the form user.toUserDto(...) ----
-
-    function checkExtensionMethodCalls(
-        sourceFile: ts.SourceFile,
-        typeChecker: ts.TypeChecker,
-        extMethods: ExtMethod[]
-    ): ts.Diagnostic[] {
-        const diagnostics: ts.Diagnostic[] = [];
-
-        function visit(node: ts.Node) {
-            if (
-                ts.isCallExpression(node) &&
-                ts.isPropertyAccessExpression(node.expression)
-            ) {
-                const propAccess = node.expression;
-                const objType = typeChecker.getTypeAtLocation(propAccess.expression);
-                const propName = propAccess.name.text;
-
-                const match = extMethods.find(
-                    m => m.name === propName && typesMatch(objType, m.firstParamType, typeChecker)
-                );
-
-                if (match) {
-                    // Parameters visible to the caller = everything except the first implicit param
-                    const expectedParams = Array.from(match.params).slice(1);
-                    const args = Array.from(node.arguments);
-
-                    const hasRest = expectedParams.some(p => !!p.dotDotDotToken);
-                    const requiredCount = expectedParams.filter(
-                        p => !p.questionToken && !p.initializer && !p.dotDotDotToken
-                    ).length;
-                    const maxCount = hasRest ? Infinity : expectedParams.length;
-
-                    // Too few arguments
-                    if (args.length < requiredCount) {
-                        diagnostics.push(makeDiag(
-                            sourceFile,
-                            node.getStart(sourceFile),
-                            node.getWidth(sourceFile),
-                            ts.DiagnosticCategory.Error,
-                            2554,
-                            `Expected ${requiredCount} argument${requiredCount === 1 ? "" : "s"}, but got ${args.length}.`
-                        ));
-                    }
-
-                    // Too many arguments
-                    if (args.length > maxCount) {
-                        for (const extraArg of args.slice(maxCount)) {
-                            diagnostics.push(makeDiag(
-                                sourceFile,
-                                extraArg.getStart(sourceFile),
-                                extraArg.getWidth(sourceFile),
-                                ts.DiagnosticCategory.Error,
-                                2554,
-                                `Expected ${expectedParams.length} argument${expectedParams.length === 1 ? "" : "s"}, but got ${args.length}.`
-                            ));
-                        }
-                    }
-
-                    // Type-check each argument against the corresponding parameter type
-                    const checkCount = Math.min(args.length, hasRest ? args.length : expectedParams.length);
-                    for (let i = 0; i < checkCount; i++) {
-                        const arg = args[i];
-                        // For rest params, reuse the last (rest) parameter type repeatedly
-                        const paramIdx = hasRest ? Math.min(i, expectedParams.length - 1) : i;
-                        const param = expectedParams[paramIdx];
-                        if (!param) continue;
-
-                        let paramType = typeChecker.getTypeAtLocation(param);
-
-                        // Unwrap the array element type for rest parameters
-                        if (param.dotDotDotToken) {
-                            const indexType = typeChecker.getIndexTypeOfType(paramType, ts.IndexKind.Number);
-                            if (indexType) paramType = indexType;
-                        }
-
-                        const argType = typeChecker.getTypeAtLocation(arg);
-
-                        // isTypeAssignableTo is an internal TS API, but stable in practice
-                        const isAssignable = (typeChecker as any).isTypeAssignableTo(argType, paramType);
-                        if (!isAssignable) {
-                            diagnostics.push(makeDiag(
-                                sourceFile,
-                                arg.getStart(sourceFile),
-                                arg.getWidth(sourceFile),
-                                ts.DiagnosticCategory.Error,
-                                2345,
-                                `Argument of type '${typeChecker.typeToString(argType)}' is not assignable to parameter of type '${typeChecker.typeToString(paramType)}'.`
-                            ));
-                        }
-                    }
-                }
-            }
-
-            ts.forEachChild(node, visit);
-        }
-
-        visit(sourceFile);
-        return diagnostics;
-    }
-
     /** Returns true when `node` (an identifier) lives inside an import declaration
      *  whose module specifier ends with ".ext" or ".ext.ts". */
     function isImportedFromExtFile(node: ts.Node): boolean {
@@ -940,14 +1142,16 @@ function init(modules: { typescript: typeof ts }) {
         sf: ts.SourceFile,
         typeChecker: ts.TypeChecker,
         match: ExtMethod,
-        out: ts.ReferencedSymbolEntry[]
+        out: ts.ReferencedSymbolEntry[],
+        extMethods: ExtMethod[],
+        program: ts.Program
     ): void {
         function visit(node: ts.Node) {
             if (
                 ts.isPropertyAccessExpression(node) &&
                 node.name.text === match.name
             ) {
-                const objType = typeChecker.getTypeAtLocation(node.expression);
+                const objType = getEffectiveReceiverType(node.expression, typeChecker, extMethods, program);
                 if (typesMatch(objType, match.firstParamType, typeChecker)) {
                     out.push({
                         fileName: sf.fileName,
@@ -967,14 +1171,16 @@ function init(modules: { typescript: typeof ts }) {
         sf: ts.SourceFile,
         typeChecker: ts.TypeChecker,
         match: ExtMethod,
-        out: ts.ReferenceEntry[]
+        out: ts.ReferenceEntry[],
+        extMethods: ExtMethod[],
+        program: ts.Program
     ): void {
         function visit(node: ts.Node) {
             if (
                 ts.isPropertyAccessExpression(node) &&
                 node.name.text === match.name
             ) {
-                const objType = typeChecker.getTypeAtLocation(node.expression);
+                const objType = getEffectiveReceiverType(node.expression, typeChecker, extMethods, program);
                 if (typesMatch(objType, match.firstParamType, typeChecker)) {
                     out.push({
                         fileName: sf.fileName,
@@ -1120,6 +1326,19 @@ function init(modules: { typescript: typeof ts }) {
 
     function normalizePath(p: string): string {
         return p.replace(/\\/g, "/");
+    }
+
+    /** Maps a TypeChecker symbol to the closest ScriptElementKind for completion entries. */
+    function symbolToScriptElementKind(symbol: ts.Symbol): ts.ScriptElementKind {
+        const decl = symbol.declarations?.[0];
+        if (!decl) return ts.ScriptElementKind.memberVariableElement;
+        if (ts.isMethodDeclaration(decl) || ts.isMethodSignature(decl)) {
+            return ts.ScriptElementKind.memberFunctionElement;
+        }
+        if (ts.isGetAccessorDeclaration(decl) || ts.isSetAccessorDeclaration(decl)) {
+            return ts.ScriptElementKind.memberGetAccessorElement;
+        }
+        return ts.ScriptElementKind.memberVariableElement;
     }
 
     function typesMatch(a: ts.Type, b: ts.Type, typeChecker: ts.TypeChecker): boolean {
