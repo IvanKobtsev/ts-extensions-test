@@ -1,11 +1,10 @@
-import type { User } from "./types";
+import type { User, UserDto } from "./types";
+import './user.ext';
 
-export type Admin = { id: string; name2: string, role: string };
-
-export function toAdmin(user: User): Admin {
-    return { id: user.id, name2: user.name, role: "admin" };
+export function toUserDto(user: User, newName?: string): UserDto {
+    return { id: user.id, fullName: `${newName ?? user.name} ${user.surname}` };
 }
 
-export function toUser(admin: Admin): User {
-    return { id: admin.id, name: admin.name2, surname: "" };
+export function toUser(userDto: UserDto): User {
+    return { id: userDto.id, name: userDto.fullName.split(' ')[0], surname: userDto.fullName.split(' ')[1] };
 }
