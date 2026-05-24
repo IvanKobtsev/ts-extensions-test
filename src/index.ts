@@ -241,6 +241,9 @@ function init(modules: { typescript: typeof import("typescript/lib/tsserverlibra
                     ...checkUnimportedExtMethodCalls(sourceFile, typeChecker, allExtMethods, importedExtFileNames, program),
                     // Error for duplicate ext method names for the same type across .ext.ts files
                     ...checkDuplicateExtMethods(sourceFile, allExtMethods, typeChecker),
+                    // Error for non-existing properties accessed on ext-method return types
+                    // (TypeScript sees these as `any` and wouldn't catch them otherwise)
+                    ...checkInvalidAccessOnExtReturnTypes(sourceFile, typeChecker, allExtMethods, program),
                 ];
 
                 return [...filtered, ...extra];
@@ -1087,6 +1090,59 @@ function init(modules: { typescript: typeof import("typescript/lib/tsserverlibra
             }
         }
 
+        return diagnostics;
+    }
+
+    /**
+     * Emits TS2339 errors for property/method accesses on expressions whose type
+     * TypeScript infers as `any` but our ext-method tracer can resolve to a concrete type.
+     *
+     * This covers cases like:
+     *   const chainedUser = user.toAdmin().toUser();  // TS sees `any`, we see `User`
+     *   chainedUser.nonExistingMethod();              // ← should be an error
+     */
+    function checkInvalidAccessOnExtReturnTypes(
+        sourceFile: ts.SourceFile,
+        typeChecker: ts.TypeChecker,
+        allExtMethods: ExtMethod[],
+        program: ts.Program
+    ): ts.Diagnostic[] {
+        const diagnostics: ts.Diagnostic[] = [];
+
+        function visit(node: ts.Node) {
+            if (ts.isPropertyAccessExpression(node)) {
+                const tsType = typeChecker.getTypeAtLocation(node.expression);
+                // Only intervene when TS has given up and inferred `any`
+                if (tsType.flags & ts.TypeFlags.Any) {
+                    const resolvedType = resolveExtReturnType(
+                        node.expression, typeChecker, allExtMethods, program
+                    );
+                    if (resolvedType && !(resolvedType.flags & ts.TypeFlags.Any)) {
+                        const propName = node.name.text;
+                        const propExists = typeChecker.getPropertiesOfType(resolvedType)
+                            .some(p => p.name === propName);
+                        const isExtMethod = allExtMethods.some(
+                            m => m.name === propName &&
+                                typesMatch(resolvedType, m.firstParamType, typeChecker)
+                        );
+                        if (!propExists && !isExtMethod) {
+                            const typeStr = typeChecker.typeToString(resolvedType);
+                            diagnostics.push(makeDiag(
+                                sourceFile,
+                                node.name.getStart(sourceFile),
+                                node.name.getWidth(sourceFile),
+                                ts.DiagnosticCategory.Error,
+                                2339,
+                                `Property '${propName}' does not exist on type '${typeStr}'.`
+                            ));
+                        }
+                    }
+                }
+            }
+            ts.forEachChild(node, visit);
+        }
+
+        visit(sourceFile);
         return diagnostics;
     }
 
