@@ -1,27 +1,63 @@
 {
   "name": "ts-extensions-test",
   "version": "1.0.0",
+  "description": "TypeScript extension methods — a TypeScript Language Service plugin and Vite plugin that let you write and call C#-style extension methods on any type.",
+  "keywords": [
+    "typescript",
+    "extension-methods",
+    "typescript-plugin",
+    "tsserver-plugin",
+    "vite-plugin",
+    "language-service",
+    "intellisense",
+    "autocomplete"
+  ],
   "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "exports": {
-    ".": "./dist/index.js",
-    "./vite-plugin": "./dist/vite-plugin.js"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./vite-plugin": {
+      "types": "./dist/vite-plugin.d.ts",
+      "default": "./dist/vite-plugin.js"
+    }
   },
-  "repository": "https://github.com/IvanKobtsev/ts-extensions-test.git",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/IvanKobtsev/ts-extensions-test.git"
+  },
   "author": "Ivan Kobtsev <ivan.kobtsev@mcc-soft.de>",
   "license": "MIT",
+  "engines": {
+    "node": ">=16"
+  },
   "scripts": {
     "build": "tsc",
-    "watch": "tsc --watch"
+    "watch": "tsc --watch",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "magic-string": "^0.30.21"
   },
   "devDependencies": {
     "@types/node": "^25.9.1",
+    "rimraf": "^6.1.3",
     "typescript": "^6.0.3",
     "vite": "^8.0.14"
   },
   "peerDependencies": {
     "typescript": ">=4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "vite": {
+      "optional": true
+    }
   }
 }

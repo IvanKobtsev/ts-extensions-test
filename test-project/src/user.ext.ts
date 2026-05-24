@@ -1,4 +1,4 @@
-import type {User } from "./types";
+import type { User } from "./types";
 
 export type Admin = { id: string; name2: string, role: string };
 

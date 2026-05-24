@@ -1,7 +1,7 @@
-import ts from "typescript/lib/tsserverlibrary";
+import ts = require("typescript/lib/tsserverlibrary");
 import * as path from "path";
 
-function init(modules: { typescript: typeof ts }) {
+function init(modules: { typescript: typeof import("typescript/lib/tsserverlibrary") }): import("typescript/lib/tsserverlibrary").server.PluginModule {
     const ts = modules.typescript;
 
     interface ExtMethod {
