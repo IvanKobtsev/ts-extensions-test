@@ -4,7 +4,4 @@ export type User = {
     surname: string;
 }
 
-export type UserDto = {
-    id: string;
-    fullName: string;
-}
+export type Admin = { id: string; name2: string, role: string };

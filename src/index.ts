@@ -1066,8 +1066,11 @@ function init(modules: { typescript: typeof import("typescript/lib/tsserverlibra
         // ---- Rule 3: only imports + function declarations are allowed ----
         for (const stmt of sourceFile.statements) {
             if (ts.isImportDeclaration(stmt)) {
-                // Rule 4: importing other .ext.ts files is forbidden inside .ext.ts
+                // Rule 4: side-effect imports of .ext.ts files are forbidden inside .ext.ts
+                // (named imports like `import { fn } from './other.ext'` are still allowed)
+                const isSideEffect = !stmt.importClause;
                 if (
+                    isSideEffect &&
                     ts.isStringLiteral(stmt.moduleSpecifier) &&
                     /\.ext(\.ts)?$/.test(stmt.moduleSpecifier.text)
                 ) {
@@ -1076,7 +1079,7 @@ function init(modules: { typescript: typeof import("typescript/lib/tsserverlibra
                         stmt.moduleSpecifier.getStart(sourceFile),
                         stmt.moduleSpecifier.getWidth(sourceFile),
                         ts.DiagnosticCategory.Error, 90005,
-                        `Importing '.ext.ts' files inside another '.ext.ts' file is not allowed. ` +
+                        `Side-effect imports of '.ext.ts' files are not allowed inside another '.ext.ts' file. ` +
                         `Extension methods cannot be used via dot-notation here anyway.`
                     ));
                 }
