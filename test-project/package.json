@@ -9,7 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "ts-extensions-test": "file:..",
+    "ts-extension-methods": "file:..",
     "typescript": "^6.0.3"
   },
   "devDependencies": {

@@ -13,7 +13,7 @@ function init(modules: { typescript: typeof import("typescript/lib/tsserverlibra
     }
 
     function create(info: ts.server.PluginCreateInfo): ts.LanguageService {
-        const log = (msg: string) => info.project.projectService.logger.info(`[ts-extensions-test] ${msg}`);
+        const log = (msg: string) => info.project.projectService.logger.info(`[ts-extension-methods] ${msg}`);
         log("Plugin loaded!");
 
         // ---- Patch getScriptSnapshot to append module augmentation to .ext.ts files ----
@@ -110,7 +110,7 @@ function init(modules: { typescript: typeof import("typescript/lib/tsserverlibra
                     ? { ...prior, entries }
                     : { isGlobalCompletion: false, isMemberCompletion: true, isNewIdentifierLocation: false, entries };
             } catch (e) {
-                info.project.projectService.logger.info(`[ts-extensions-test] Error in getCompletionsAtPosition: ${e}`);
+                info.project.projectService.logger.info(`[ts-extension-methods] Error in getCompletionsAtPosition: ${e}`);
                 return prior;
             }
         };
@@ -149,7 +149,7 @@ function init(modules: { typescript: typeof import("typescript/lib/tsserverlibra
                         codeActions: codeActions.length > 0 ? codeActions : undefined,
                     };
                 } catch (e) {
-                    info.project.projectService.logger.info(`[ts-extensions-test] Error in getCompletionEntryDetails: ${e}`);
+                    info.project.projectService.logger.info(`[ts-extension-methods] Error in getCompletionEntryDetails: ${e}`);
                     return undefined;
                 }
             }
@@ -250,7 +250,7 @@ function init(modules: { typescript: typeof import("typescript/lib/tsserverlibra
 
                 return [...filtered, ...extra];
             } catch (e) {
-                info.project.projectService.logger.info(`[ts-extensions-test] Error in getSemanticDiagnostics: ${e}`);
+                info.project.projectService.logger.info(`[ts-extension-methods] Error in getSemanticDiagnostics: ${e}`);
                 return diagnostics;
             }
         };
@@ -270,7 +270,7 @@ function init(modules: { typescript: typeof import("typescript/lib/tsserverlibra
 
                 return filterExtDiagnostics(diagnostics as ts.Diagnostic[], sourceFile, typeChecker, extMethods, program) as ts.DiagnosticWithLocation[];
             } catch (e) {
-                info.project.projectService.logger.info(`[ts-extensions-test] Error in getSuggestionDiagnostics: ${e}`);
+                info.project.projectService.logger.info(`[ts-extension-methods] Error in getSuggestionDiagnostics: ${e}`);
                 return diagnostics;
             }
         };
@@ -356,7 +356,7 @@ function init(modules: { typescript: typeof import("typescript/lib/tsserverlibra
                     argumentCount: args.length,
                 };
             } catch (e) {
-                info.project.projectService.logger.info(`[ts-extensions-test] Error in getSignatureHelpItems: ${e}`);
+                info.project.projectService.logger.info(`[ts-extension-methods] Error in getSignatureHelpItems: ${e}`);
                 return prior;
             }
         };
@@ -414,7 +414,7 @@ function init(modules: { typescript: typeof import("typescript/lib/tsserverlibra
 
                 return { spans: [...filteredSpans, ...extraSpans], endOfLineState: result.endOfLineState };
             } catch (e) {
-                info.project.projectService.logger.info(`[ts-extensions-test] Error in getEncodedSemanticClassifications: ${e}`);
+                info.project.projectService.logger.info(`[ts-extension-methods] Error in getEncodedSemanticClassifications: ${e}`);
                 return result;
             }
         };
@@ -457,7 +457,7 @@ function init(modules: { typescript: typeof import("typescript/lib/tsserverlibra
 
                 return prior;
             } catch (e) {
-                info.project.projectService.logger.info(`[ts-extensions-test] Error in findReferences: ${e}`);
+                info.project.projectService.logger.info(`[ts-extension-methods] Error in findReferences: ${e}`);
                 return prior;
             }
         };
@@ -492,7 +492,7 @@ function init(modules: { typescript: typeof import("typescript/lib/tsserverlibra
 
                 return [...(prior ?? []), ...callRefs];
             } catch (e) {
-                info.project.projectService.logger.info(`[ts-extensions-test] Error in getReferencesAtPosition: ${e}`);
+                info.project.projectService.logger.info(`[ts-extension-methods] Error in getReferencesAtPosition: ${e}`);
                 return prior;
             }
         };
@@ -569,13 +569,13 @@ function init(modules: { typescript: typeof import("typescript/lib/tsserverlibra
                     }
                 }
             } catch (e) {
-                info.project.projectService.logger.info(`[ts-extensions-test] Error in getDefinitionAndBoundSpan: ${e}`);
+                info.project.projectService.logger.info(`[ts-extension-methods] Error in getDefinitionAndBoundSpan: ${e}`);
             }
 
             try {
                 return info.languageService.getDefinitionAndBoundSpan(fileName, position);
             } catch (e) {
-                info.project.projectService.logger.info(`[ts-extensions-test] Error in getDefinitionAndBoundSpan fallback: ${e}`);
+                info.project.projectService.logger.info(`[ts-extension-methods] Error in getDefinitionAndBoundSpan fallback: ${e}`);
                 return undefined;
             }
         };
@@ -636,7 +636,7 @@ function init(modules: { typescript: typeof import("typescript/lib/tsserverlibra
                     }
                 }
             } catch (e) {
-                info.project.projectService.logger.info(`[ts-extensions-test] Error in getDefinitionAtPosition: ${e}`);
+                info.project.projectService.logger.info(`[ts-extension-methods] Error in getDefinitionAtPosition: ${e}`);
             }
 
             return info.languageService.getDefinitionAtPosition(fileName, position);
@@ -726,7 +726,7 @@ function init(modules: { typescript: typeof import("typescript/lib/tsserverlibra
                     }
                 }
             } catch (e) {
-                info.project.projectService.logger.info(`[ts-extensions-test] Error in getQuickInfoAtPosition: ${e}`);
+                info.project.projectService.logger.info(`[ts-extension-methods] Error in getQuickInfoAtPosition: ${e}`);
             }
 
             return info.languageService.getQuickInfoAtPosition(fileName, position);
@@ -782,7 +782,7 @@ function init(modules: { typescript: typeof import("typescript/lib/tsserverlibra
 
                 return [...prior, fix];
             } catch (e) {
-                info.project.projectService.logger.info(`[ts-extensions-test] Error in getCodeFixesAtPosition: ${e}`);
+                info.project.projectService.logger.info(`[ts-extension-methods] Error in getCodeFixesAtPosition: ${e}`);
                 return prior;
             }
         };
@@ -1372,7 +1372,7 @@ function init(modules: { typescript: typeof import("typescript/lib/tsserverlibra
         code: number,
         messageText: string
     ): ts.Diagnostic {
-        return { file, start, length, category, code, messageText, source: "ts-extensions-test" };
+        return { file, start, length, category, code, messageText, source: "ts-extension-methods" };
     }
 
     function extractExtMethod(

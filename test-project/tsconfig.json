@@ -11,7 +11,7 @@
     "skipLibCheck": true,
     "plugins": [
       {
-        "name": "ts-extensions-test"
+        "name": "ts-extension-methods"
       }
     ]
   },

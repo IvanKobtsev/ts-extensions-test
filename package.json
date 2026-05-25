@@ -1,5 +1,5 @@
 {
-  "name": "ts-extensions-test",
+  "name": "ts-extension-methods",
   "version": "1.0.0",
   "description": "TypeScript extension methods — a TypeScript Language Service plugin and Vite plugin that let you write and call C#-style extension methods on any type.",
   "keywords": [
@@ -31,7 +31,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/IvanKobtsev/ts-extensions-test.git"
+    "url": "https://github.com/IvanKobtsev/ts-extension-methods.git"
   },
   "author": "Ivan Kobtsev <ivan.kobtsev@mcc-soft.de>",
   "license": "MIT",

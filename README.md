@@ -1,13 +1,13 @@
-# ts-extensions-test
+# ts-extension-methods
 
 > **TypeScript extension methods** — write C#-style extension methods on any type, with full IDE support: autocompletion, hover tooltips, go-to-definition, signature help, and semantic highlighting.
 
 The package ships two independent pieces:
 
-| Export | Purpose |
-|--------|---------|
-| `ts-extensions-test` (default) | **TypeScript Language Service plugin** — IDE intelligence |
-| `ts-extensions-test/vite-plugin` | **Vite plugin** — runtime code transform |
+| Export                             | Purpose                                                    |
+|------------------------------------|------------------------------------------------------------|
+| `ts-extension-methods` (default)   | **TypeScript Language Service plugin** — IDE intelligence  |
+| `ts-extension-methods/vite-plugin` | **Vite plugin** — runtime code transform                   |
 
 ---
 
@@ -50,7 +50,7 @@ const admin = toAdmin(user);  // runtime output
 ## Installation
 
 ```bash
-npm install -D ts-extensions-test
+npm install -D ts-extension-methods
 ```
 
 ---
@@ -65,7 +65,7 @@ Add the plugin to your `tsconfig.json`:
 {
   "compilerOptions": {
     "plugins": [
-      { "name": "ts-extensions-test" }
+      { "name": "ts-extension-methods" }
     ]
   }
 }
@@ -78,7 +78,7 @@ Add the plugin to your `tsconfig.json`:
 ```ts
 // vite.config.ts
 import { defineConfig } from "vite";
-import { tsExtensionsPlugin } from "ts-extensions-test/vite-plugin";
+import { tsExtensionsPlugin } from "ts-extension-methods/vite-plugin";
 
 export default defineConfig({
     plugins: [tsExtensionsPlugin()],
@@ -138,17 +138,17 @@ const renamed = user.rename("Bob").toAdmin();
 
 ## IDE features
 
-| Feature | Supported |
-|---------|-----------|
-| Autocompletion (dot-access) | ✅ |
-| Hover tooltip (extension method signature) | ✅ |
-| Go to definition (`Ctrl+Click`) | ✅ |
-| Signature help (parameter hints) | ✅ |
-| Semantic token coloring (function color) | ✅ |
-| Error suppression for valid ext calls | ✅ |
-| "Not imported" error + quick fix | ✅ |
-| Duplicate extension method detection | ✅ |
-| "Find references" / "Find usages" | ✅ |
+| Feature                                    | Supported |
+|--------------------------------------------|-----------|
+| Autocompletion (dot-access)                | ✅         |
+| Hover tooltip (extension method signature) | ✅         |
+| Go to definition (`Ctrl+Click`)            | ✅         |
+| Signature help (parameter hints)           | ✅         |
+| Semantic token coloring (function color)   | ✅         |
+| Error suppression for valid ext calls      | ✅         |
+| "Not imported" error + quick fix           | ✅         |
+| Duplicate extension method detection       | ✅         |
+| "Find references" / "Find usages"          | ✅         |
 
 ---
 
