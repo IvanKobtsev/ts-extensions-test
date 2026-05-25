@@ -136,27 +136,11 @@ const renamed = user.rename("Bob").toAdmin();
 
 ---
 
-## IDE features
-
-| Feature                                    | Supported |
-|--------------------------------------------|-----------|
-| Autocompletion (dot-access)                | ✅         |
-| Hover tooltip (extension method signature) | ✅         |
-| Go to definition (`Ctrl+Click`)            | ✅         |
-| Signature help (parameter hints)           | ✅         |
-| Semantic token coloring (function color)   | ✅         |
-| Error suppression for valid ext calls      | ✅         |
-| "Not imported" error + quick fix           | ✅         |
-| Duplicate extension method detection       | ✅         |
-| "Find references" / "Find usages"          | ✅         |
-
----
-
 ## Limitations & known issues
 
-- Module augmentation (for IDE return-type inference) only works when the receiver type is declared as an `interface`, not a `type` alias. Extension methods on `type` aliases are still callable and transformed correctly at runtime; they just won't be visible in the hover tooltip's type chain.
-- The TypeScript Language Service plugin does **not** affect `tsc` compilation output — only IDE tooling. The Vite plugin is required for the runtime transform.
-- The plugin is still in early development and may have edge cases. Contributions and bug reports are welcome!
+- The plugin isn't very compatible with WebStorm — it can parse the extension methods and provide autocompletion, but go-to-definition and signature help don't work. VS Code works perfectly.
+- The TypeScript Language Service plugin does **not** affect `tsc` compilation output — only IDE tooling. The Vite plugin is required for the runtime transform. Other bundlers (Webpack, Rollup) aren't supported yet.
+- Since the plugin was literally vibe-coded in just a couple of days and wasn't properly tested yet, it may be full of unknown issues. Contributions and bug reports are welcome!
 
 ---
 
